@@ -2,6 +2,7 @@
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -10,13 +11,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 
+#define DEBUG			1
 
 #define READNUM		1024
 #define THREADNUM	10
+#define IMAGEPATH	"images"
+#define HTMLPATH	"htmlroot"
+#define JSPATH		"javascript"
+
 
 static int listen_sock = -1;
-struct request
+
+struct request_st
 {
 	int listen_fd;
 	int accept_fd[THREADNUM];
@@ -25,9 +33,14 @@ struct request
 	pthread_mutex_t mutex;
 };
 
-struct request re;
+static struct request_st request;
 
 void *work_thread(void *arg);
+void send_http_error(int sock, int errorcode, const char *explain);
+void send_http_data(int sock, const char *buf);
+void send_http_head(int sock);
+int parserequest(const char *buf, char *method, char *url);
+void dealrequest(int sock, const char *method, const char *url);
 
 int main(int argc, char *argv[])
 {
@@ -65,7 +78,7 @@ int main(int argc, char *argv[])
 		close(listen_sock);
 		return -1;
 	}
-	
+
 	if(listen(listen_sock, 20) == -1)
 	{
 		puts(strerror(errno));
@@ -73,26 +86,25 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 	//init request
-	re.listen_fd = listen_sock;
-	re.sp = 0;
-	pthread_cond_init(&re.cond, NULL);
-	pthread_mutex_init(&re.mutex, NULL);
+	request.listen_fd = listen_sock;
+	request.sp = 0;
+	pthread_cond_init(&request.cond, NULL);
+	pthread_mutex_init(&request.mutex, NULL);
 	for(i = 0; i < 10; ++i)
 	{
-		re.accept_fd[i] = -1;
+		request.accept_fd[i] = -1;
 	}
-	
+
 	for(i = 0; i < 10; ++i)
 	{
 		pthread_create(&threadid[i], NULL, work_thread, NULL);
 	}
-	
+
 	while(1)
 	{	
-		puts("waiting............\n");
 		FD_ZERO(&readfds);
 		FD_SET(listen_sock, &readfds);
-		timeout.tv_sec = 1;
+		timeout.tv_sec = 0;
 		timeout.tv_usec = 1;
 		if(select(listen_sock+1, &readfds, NULL, NULL, &timeout) < 0)
 		{
@@ -102,23 +114,22 @@ int main(int argc, char *argv[])
 		if(FD_ISSET(listen_sock, &readfds))
 		{
 			accept_sock = accept(listen_sock, NULL, NULL);
+			printf("Recive Request\n");
 			if(accept_sock < 0)
 			{
 				puts(strerror(errno));
 				break;
 			}
-			pthread_mutex_lock(&re.mutex);
-			while(re.sp >= THREADNUM)
+			pthread_mutex_lock(&request.mutex);
+			while(request.sp >= THREADNUM)
 			{
-				pthread_cond_wait(&re.cond, &re.mutex);
+				pthread_cond_wait(&request.cond, &request.mutex);
 			}	
-			re.accept_fd[++re.sp] = accept_sock;
-			pthread_mutex_unlock(&re.mutex);
-			pthread_cond_signal(&re.cond);
+			request.accept_fd[++request.sp] = accept_sock;
+			pthread_mutex_unlock(&request.mutex);
+			pthread_cond_signal(&request.cond);
 		}
 	}
-	
-	
 	close(listen_sock);
 	return 0;
 }
@@ -128,31 +139,201 @@ void *work_thread(void *arg)
 {
 	int sock = -1;
 	char buf[1024] = {0};
+	char method[50] = {0};
+	char url[50] = {0};
+	int result = -1;
 	while(1)
 	{
-			pthread_mutex_lock(&re.mutex);
+		memset(buf, 0x00, sizeof(buf));
+		memset(method, 0x00, sizeof(method));
+		memset(url, 0x00, sizeof(url));
 
-			while(re.sp <= 0)
-			{
-					pthread_cond_wait(&re.cond, &re.mutex);
-			}
+		pthread_mutex_lock(&request.mutex);
 
-			sock = re.accept_fd[re.sp--];
+		while(request.sp <= 0)
+		{
+			pthread_cond_wait(&request.cond, &request.mutex);
+		}
 
-			pthread_mutex_unlock(&re.mutex);
-			pthread_cond_signal(&re.cond);
+		sock = request.accept_fd[request.sp--];
 
-			do
-			{
-				memset(buf, 0x00, sizeof(buf));
-				read(sock, buf, 1024);
-				puts(buf);
-				if(strstr(buf, "close") != NULL)
-				{
-					break;
-				}
-			}while(1);
+		pthread_mutex_unlock(&request.mutex);
+		pthread_cond_signal(&request.cond);
 
-			close(sock);
+		read(sock, buf, 1024);
+#if DEBUG
+		puts(buf);
+#endif
+		result = parserequest(buf, method, url);
+		if(result != -1)
+		{
+			dealrequest(sock, method, url);
+		}
+		else
+		{
+			printf("send Error To browser\n");
+			send_http_error(sock, 400, "Bad Request");
+		}
+
+		close(sock);
+	}
+}
+
+int parserequest(const char *buf, char *method, char *url)
+{
+	char tmpbuf[1024] = {0};
+	const char *start = NULL, *end = NULL;
+	if(NULL == buf || NULL == method || NULL == url)
+	{
+		printf("recive argument is NULL\n");
+		return -1;
+	}
+	sprintf(method, "%s", "GET");
+
+	if(NULL != (start = strchr(buf, '/')))
+	{
+		end = strchr(start, ' ');
+		if(NULL != end)
+		{
+			strcat(tmpbuf, HTMLPATH);
+			strncat(tmpbuf, start, end-start+1);
+			snprintf(url, strlen(tmpbuf), "%s", tmpbuf);
+		}
+		else
+		{
+			return -1;
+		}
+	}
+	else
+	{
+		return -1;
+	}
+	return 1;
+}
+void dealrequest(int sock, const char *method, const char *url)
+{
+	int filefd = -1;
+	int cnt = 0;
+	int writecnt = 0;
+	int ret = 0;
+	const char *filepath = NULL;
+	char buf[1024] = {0};
+	if(sock < 0 || NULL == method || NULL == url)
+	{
+		printf("%s Recive Error Argument\n", __FUNCTION__);
+		return;
+	}
+	if(!strcmp("GET", method))
+	{
+		if(!strcmp(url, "htmlroot/"))
+		{
+			filepath = "htmlroot/index.html";
+		}
+		else
+		{
+			filepath = url;
+		}
+
+		puts(filepath);
+		filefd = open(filepath, O_RDONLY);
+		if(filefd < 0)
+		{
+#if DEBUG
+			puts("open File failed");
+#endif
+			send_http_error(sock, 404, "Not Found");
+
+			return;
+		}
+		while(1)
+		{
+			send_http_head(sock);
+			memset(buf, 0x00, sizeof(buf));
+			ret = read(filefd, buf, sizeof(buf) - 1);
+			if(0 == ret)
+				break;
+
+			send_http_data(sock, buf);
+		}
+	}
+}
+
+void send_http_error(int sock, int errorcode, const char *explain)
+{
+	if(sock < 0)
+	{
+		return;
+	}
+	int ret = 0;
+	int cnt = 0;
+	char buf[1024] = {0};
+	strcat(buf, "HTTP/1.1 ");
+	sprintf(buf+strlen(buf), "%d ", errorcode);
+	sprintf(buf+strlen(buf), "%s\r\n\r\n", explain);
+
+	while(1)
+	{
+		ret = write(sock, buf+cnt, strlen(buf)-cnt);
+		if(ret == 0)
+		{
+			break;
+		}
+		cnt += ret;
+		if(cnt < strlen(buf))
+		{
+			continue;
+		}
+	}
+}
+void send_http_head(int sock)
+{
+	if(sock < 0)
+	{
+		return; 
+	}
+	char buf[1024] = "HTTP/1.1 200 OK\r\n\r\n";
+	int cnt = 0, ret = 0;
+	while(1)
+	{
+		ret = write(sock, buf + cnt, strlen(buf) - cnt);
+		if(ret < 0)
+		{
+			puts(strerror(errno));
+			break;
+		}
+		if(ret == 0)
+		{
+			break;
+		}
+		cnt += ret;
+		if(cnt < strlen(buf))
+		{
+			continue;
+		}
+	}
+}
+void send_http_data(int sock, const char *buf)
+{
+	if(sock < 0 || NULL == buf)
+	{
+		printf("%s Recive Argument Error\n", __FUNCTION__);
+		return ;
+	}
+	int ret = 0, cnt = 0;
+#if DEBUG
+	puts(buf);
+#endif
+	while(1)
+	{
+		ret = write(sock, buf+cnt, strlen(buf)-cnt);
+		if(ret == 0)
+		{
+			break;
+		}
+		cnt += ret;
+		if(cnt < strlen(buf))
+		{
+			continue;
+		}
 	}
 }
