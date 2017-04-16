@@ -37,7 +37,7 @@ static struct request_st request;
 
 void *work_thread(void *arg);
 void send_http_error(int sock, int errorcode, const char *explain);
-void send_http_data(int sock, const char *buf);
+void send_http_data(int sock, const char *buf, int size);
 void send_http_head(int sock);
 int parserequest(const char *buf, char *method, char *url);
 void dealrequest(int sock, const char *method, const char *url);
@@ -233,8 +233,9 @@ void dealrequest(int sock, const char *method, const char *url)
 		{
 			filepath = url;
 		}
-
+#if DEBUG
 		puts(filepath);
+#endif
 		filefd = open(filepath, O_RDONLY);
 		if(filefd < 0)
 		{
@@ -245,15 +246,20 @@ void dealrequest(int sock, const char *method, const char *url)
 
 			return;
 		}
+		send_http_head(sock);
 		while(1)
 		{
-			send_http_head(sock);
 			memset(buf, 0x00, sizeof(buf));
 			ret = read(filefd, buf, sizeof(buf) - 1);
+			if(ret < 0)
+			{
+				puts(strerror(errno));
+				break;
+			}
 			if(0 == ret)
 				break;
 
-			send_http_data(sock, buf);
+			send_http_data(sock, buf, ret);
 		}
 	}
 }
@@ -271,18 +277,15 @@ void send_http_error(int sock, int errorcode, const char *explain)
 	sprintf(buf+strlen(buf), "%d ", errorcode);
 	sprintf(buf+strlen(buf), "%s\r\n\r\n", explain);
 
-	while(1)
+	while(cnt < strlen(buf))
 	{
 		ret = write(sock, buf+cnt, strlen(buf)-cnt);
-		if(ret == 0)
+		if(ret < 0)
 		{
+			puts(strerror(errno));
 			break;
 		}
 		cnt += ret;
-		if(cnt < strlen(buf))
-		{
-			continue;
-		}
 	}
 }
 void send_http_head(int sock)
@@ -293,7 +296,7 @@ void send_http_head(int sock)
 	}
 	char buf[1024] = "HTTP/1.1 200 OK\r\n\r\n";
 	int cnt = 0, ret = 0;
-	while(1)
+	while(cnt < strlen(buf))
 	{
 		ret = write(sock, buf + cnt, strlen(buf) - cnt);
 		if(ret < 0)
@@ -301,18 +304,10 @@ void send_http_head(int sock)
 			puts(strerror(errno));
 			break;
 		}
-		if(ret == 0)
-		{
-			break;
-		}
 		cnt += ret;
-		if(cnt < strlen(buf))
-		{
-			continue;
-		}
 	}
 }
-void send_http_data(int sock, const char *buf)
+void send_http_data(int sock, const char *buf, int size)
 {
 	if(sock < 0 || NULL == buf)
 	{
@@ -323,17 +318,14 @@ void send_http_data(int sock, const char *buf)
 #if DEBUG
 	puts(buf);
 #endif
-	while(1)
+	while(cnt < size)
 	{
-		ret = write(sock, buf+cnt, strlen(buf)-cnt);
-		if(ret == 0)
+		ret = write(sock, buf+cnt, size-cnt);
+		if(ret < 0)
 		{
+			puts(strerror(errno));
 			break;
 		}
 		cnt += ret;
-		if(cnt < strlen(buf))
-		{
-			continue;
-		}
 	}
 }
