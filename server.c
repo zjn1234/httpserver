@@ -15,11 +15,11 @@
 
 #define DEBUG			1
 
-#define READNUM		1024
-#define THREADNUM	10
-#define IMAGEPATH	"images"
-#define HTMLPATH	"htmlroot"
-#define JSPATH		"javascript"
+#define READNUM			1024
+#define THREADNUM		10
+#define IMAGEPATH		"images"
+#define HTMLPATH		"htmlroot"
+#define JSPATH			"javascript"
 
 
 static int listen_sock = -1;
@@ -28,7 +28,8 @@ struct request_st
 {
 	int listen_fd;
 	int accept_fd[THREADNUM];
-	int sp;
+	int head;
+	int tail;
 	pthread_cond_t cond;
 	pthread_mutex_t mutex;
 };
@@ -87,7 +88,7 @@ int main(int argc, char *argv[])
 	}
 	//init request
 	request.listen_fd = listen_sock;
-	request.sp = 0;
+	request.head = request.tail = 0;
 	pthread_cond_init(&request.cond, NULL);
 	pthread_mutex_init(&request.mutex, NULL);
 	for(i = 0; i < 10; ++i)
@@ -121,16 +122,23 @@ int main(int argc, char *argv[])
 				break;
 			}
 			pthread_mutex_lock(&request.mutex);
-			while(request.sp >= THREADNUM)
+			while((request.tail + 1)%THREADNUM == request.head)
 			{
 				pthread_cond_wait(&request.cond, &request.mutex);
 			}	
-			request.accept_fd[++request.sp] = accept_sock;
+			request.accept_fd[request.tail] = accept_sock;
+			request.tail = (request.tail + 1)%THREADNUM;
 			pthread_mutex_unlock(&request.mutex);
 			pthread_cond_signal(&request.cond);
 		}
 	}
+	for(i = 0; i < THREADNUM; ++i)
+	{
+		pthread_join(threadid[i], NULL);
+	}
 	close(listen_sock);
+	pthread_cond_destroy(&request.cond);
+	pthread_mutex_destroy(&request.mutex);
 	return 0;
 }
 
@@ -150,12 +158,13 @@ void *work_thread(void *arg)
 
 		pthread_mutex_lock(&request.mutex);
 
-		while(request.sp <= 0)
+		while(request.head == request.tail)
 		{
 			pthread_cond_wait(&request.cond, &request.mutex);
 		}
 
-		sock = request.accept_fd[request.sp--];
+		sock = request.accept_fd[request.head];
+		request.head = (request.head + 1)%THREADNUM;
 
 		pthread_mutex_unlock(&request.mutex);
 		pthread_cond_signal(&request.cond);
@@ -177,6 +186,7 @@ void *work_thread(void *arg)
 
 		close(sock);
 	}
+	pthread_exit(NULL);
 }
 
 int parserequest(const char *buf, char *method, char *url)
